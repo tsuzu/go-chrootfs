@@ -57,6 +57,35 @@ func TestOpenRejectsInvalidFSPath(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsDotDotEscapePath(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	outside := filepath.Join(base, "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfs, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cfs.Close() })
+
+	for _, name := range []string{"../../outside.txt", "dir/../../outside.txt"} {
+		_, err := cfs.Open(name)
+		if err == nil {
+			t.Fatalf("Open(%q): expected error", name)
+		}
+		if !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("Open(%q): expected fs.ErrInvalid, got: %v", name, err)
+		}
+	}
+}
+
 func TestAbsoluteSymlinkIsResolvedInRoot(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "target.txt"), []byte("in-root"), 0o644); err != nil {
