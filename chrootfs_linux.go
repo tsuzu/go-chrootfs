@@ -5,7 +5,6 @@ package chrootfs
 import (
 	"io/fs"
 	"os"
-	"path"
 	"strings"
 	"sync"
 
@@ -14,8 +13,8 @@ import (
 
 // ChrootFS is an fs.FS backed by a fixed root directory.
 //
-// Paths are resolved via openat2(RESOLVE_IN_ROOT), so even absolute paths
-// and symlink traversals are constrained to the root directory passed to New.
+// Paths are resolved via openat2(RESOLVE_IN_ROOT), so symlink traversals are
+// constrained to the root directory passed to New.
 type ChrootFS struct {
 	mu   sync.RWMutex
 	root *os.File
@@ -79,16 +78,12 @@ func (c *ChrootFS) Open(name string) (fs.File, error) {
 }
 
 func cleanOpenName(name string) (string, error) {
-	if name == "" {
+	if strings.ContainsRune(name, 0) {
 		return "", fs.ErrInvalid
 	}
-	if strings.Contains(name, "\\") || strings.ContainsRune(name, 0) {
+	if !fs.ValidPath(name) {
 		return "", fs.ErrInvalid
 	}
 
-	cleaned := path.Clean(name)
-	if cleaned == "" {
-		return "", fs.ErrInvalid
-	}
-	return cleaned, nil
+	return name, nil
 }

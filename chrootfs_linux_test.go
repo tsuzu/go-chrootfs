@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestOpenRelativeAndAbsolute(t *testing.T) {
+func TestOpenRelative(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -23,19 +23,36 @@ func TestOpenRelativeAndAbsolute(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cfs.Close() })
 
-	for _, name := range []string{"hello.txt", "/hello.txt"} {
-		f, err := cfs.Open(name)
-		if err != nil {
-			t.Fatalf("Open(%q): %v", name, err)
-		}
+	f, err := cfs.Open("hello.txt")
+	if err != nil {
+		t.Fatalf("Open(%q): %v", "hello.txt", err)
+	}
 
-		b, err := io.ReadAll(f)
-		_ = f.Close()
-		if err != nil {
-			t.Fatalf("ReadAll(%q): %v", name, err)
+	b, err := io.ReadAll(f)
+	_ = f.Close()
+	if err != nil {
+		t.Fatalf("ReadAll(%q): %v", "hello.txt", err)
+	}
+	if string(b) != "hello" {
+		t.Fatalf("unexpected content for %q: %q", "hello.txt", string(b))
+	}
+}
+
+func TestOpenRejectsInvalidFSPath(t *testing.T) {
+	root := t.TempDir()
+	cfs, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cfs.Close() })
+
+	for _, name := range []string{"", "/hello.txt", "../hello.txt", "a/../b", "./hello.txt"} {
+		_, err := cfs.Open(name)
+		if err == nil {
+			t.Fatalf("Open(%q): expected error", name)
 		}
-		if string(b) != "hello" {
-			t.Fatalf("unexpected content for %q: %q", name, string(b))
+		if !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("Open(%q): expected fs.ErrInvalid, got: %v", name, err)
 		}
 	}
 }
