@@ -17,11 +17,11 @@ go get github.com/tsuzu/go-chrootfs
 ## Usage
 
 ```go
-cfs, err := chrootfs.New("/sandbox")
+root, err := chrootfs.New("/sandbox")
 if err != nil {
     // handle error
 }
-defer cfs.Close()
+defer root.Close()
 
-b, err := fs.ReadFile(cfs, "etc/hosts")
+b, err := fs.ReadFile(root.FS(), "etc/hosts")
 ```
