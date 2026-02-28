@@ -103,7 +103,7 @@ func (c *ChrootFS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 // Stat returns a FileInfo describing the named file.
 func (c *ChrootFS) Stat(name string) (fs.FileInfo, error) {
-	file, err := c.open(name, "stat", uint64(unix.O_RDONLY))
+	file, err := c.open(name, "stat", uint64(unix.O_PATH))
 	if err != nil {
 		return nil, err
 	}
@@ -146,26 +146,18 @@ func (c *ChrootFS) ReadLink(name string) (string, error) {
 	}
 
 	var parentFD int
-	releaseParent := func() {}
 
 	c.mu.RLock()
 	if c == nil || c.root == nil {
 		c.mu.RUnlock()
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: os.ErrClosed}
 	}
-	parentFD = int(c.root.Fd())
-	if dirName != "." {
-		parent, err := openat2(parentFD, dirName, uint64(unix.O_PATH|unix.O_DIRECTORY))
-		c.mu.RUnlock()
-		if err != nil {
-			return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
-		}
-		parentFD = parent
-		releaseParent = func() { _ = unix.Close(parentFD) }
-	} else {
-		c.mu.RUnlock()
+	parentFD, err = openat2(int(c.root.Fd()), dirName, uint64(unix.O_PATH|unix.O_DIRECTORY))
+	c.mu.RUnlock()
+	if err != nil {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
 	}
-	defer releaseParent()
+	defer func() { _ = unix.Close(parentFD) }()
 
 	target, err := readlinkat(parentFD, baseName)
 	if err != nil {

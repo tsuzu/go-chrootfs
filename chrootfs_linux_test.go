@@ -258,6 +258,31 @@ func TestStatLstatReadLink(t *testing.T) {
 	}
 }
 
+func TestStatDoesNotRequireReadPermission(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "x")
+	if err := os.WriteFile(filePath, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filePath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	cfs, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cfs.Close() })
+
+	info, err := cfs.Stat("x")
+	if err != nil {
+		t.Fatalf("Stat should succeed without read permission: %v", err)
+	}
+	if info.Name() != "x" {
+		t.Fatalf("unexpected name: %q", info.Name())
+	}
+}
+
 func TestReadLinkCannotEscapeViaSymlinkedParent(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "root")
