@@ -317,3 +317,70 @@ func TestRootLikeStatDoesNotRequireReadPermission(t *testing.T) {
 		t.Fatalf("unexpected name: %q", st.Name())
 	}
 }
+
+func TestRootLikeOpenIsReadOnlyLikeOSRoot(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(p, []byte("orig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := newChroot(t, root)
+	oref, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = oref.Close() })
+
+	cf, err := c.Open("file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cf.Close()
+
+	of, err := oref.Open("file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer of.Close()
+
+	if _, err := cf.Write([]byte("X")); err == nil {
+		t.Fatal("Chroot.Open should be read-only")
+	}
+	if _, err := of.Write([]byte("X")); err == nil {
+		t.Fatal("os.Root.Open should be read-only")
+	}
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "orig" {
+		t.Fatalf("unexpected content after write attempt: %q", string(got))
+	}
+}
+
+func TestRootLikeOpenFileSupportsWrite(t *testing.T) {
+	root := t.TempDir()
+	c := newChroot(t, root)
+
+	f, err := c.OpenFile("w.txt", os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("ok")); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(root, "w.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "ok" {
+		t.Fatalf("unexpected content: %q", string(b))
+	}
+}

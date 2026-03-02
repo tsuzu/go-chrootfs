@@ -9,6 +9,8 @@ import (
 // RootLike is a Root-style filesystem API.
 //
 // It is intentionally similar to os.Root, but does not include OpenRoot.
+// For creating sub-roots, use the OpenRoot helper function which works
+// with both os.Root and chrootfs implementations.
 type RootLike interface {
 	Name() string
 	Close() error
@@ -39,4 +41,16 @@ type RootLike interface {
 	WriteFile(name string, data []byte, perm os.FileMode) error
 
 	FS() fs.FS
+}
+
+// RootLikeWithOpenRoot is a RootLike that supports creating sub-roots.
+//
+// This interface extends RootLike with an OpenRoot method, similar to os.Root.
+// Chroot implements this interface, while os.Root does not (as of Go 1.24).
+//
+// To work with both os.Root and Chroot uniformly, use the OpenRoot helper
+// function instead of calling this method directly.
+type RootLikeWithOpenRoot interface {
+	RootLike
+	OpenRoot(name string) (RootLike, error)
 }

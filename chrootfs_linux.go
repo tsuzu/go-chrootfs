@@ -20,8 +20,27 @@ type pathCleaner func(name string) (string, error)
 
 // Chroot is a root-like filesystem backed by a fixed directory.
 //
-// Path resolution uses openat2(RESOLVE_IN_ROOT), so traversal and symlink
-// resolution stay within the configured root.
+// It provides an os.Root-compatible API for secure file operations within
+// a directory tree. Unlike os.Root, it supports absolute paths (e.g., "/etc/hosts")
+// which are resolved relative to the root directory.
+//
+// Path resolution uses openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS),
+// ensuring that symbolic links and ".." components cannot escape the root.
+//
+// Example:
+//
+//	root, err := chrootfs.New("/sandbox")
+//	if err != nil {
+//	    return err
+//	}
+//	defer root.Close()
+//
+//	// Absolute paths are allowed
+//	f, err := root.Open("/etc/config.json")
+//
+//	// Get io/fs.FS view for standard library functions
+//	fsys := root.FS()
+//	data, err := fs.ReadFile(fsys, "etc/config.json")
 type Chroot struct {
 	mu   sync.RWMutex
 	name string
@@ -44,6 +63,11 @@ func New(dir string) (*Chroot, error) {
 	return &Chroot{name: dir, root: os.NewFile(uintptr(fd), dir)}, nil
 }
 
+// Name returns the path that was used to open this Chroot.
+//
+// For Chroots created via FS().Sub(), this returns the joined path.
+// Note: if the underlying directory is moved after opening, this name
+// may no longer reflect the actual filesystem location.
 func (c *Chroot) Name() string {
 	if c == nil {
 		return ""
@@ -67,7 +91,7 @@ func (c *Chroot) Close() error {
 
 // Open opens name within the configured root for reading.
 func (c *Chroot) Open(name string) (*os.File, error) {
-	return c.open(name, "open", uint64(unix.O_RDONLY), cleanRootName)
+	return c.open(name, "open", uint64(unix.O_RDONLY), 0, cleanRootName)
 }
 
 // Create creates or truncates the named file in the root.
@@ -80,7 +104,11 @@ func (c *Chroot) OpenFile(name string, flag int, perm os.FileMode) (*os.File, er
 	if err := validatePermMode("open", name, perm); err != nil {
 		return nil, err
 	}
-	return c.open(name, "open", uint64(flag), cleanRootName)
+	mode := uint64(0)
+	if flag&os.O_CREATE != 0 {
+		mode = uint64(perm)
+	}
+	return c.open(name, "open", uint64(flag), mode, cleanRootName)
 }
 
 // ReadFile reads the named file.
@@ -106,6 +134,9 @@ func (c *Chroot) WriteFile(name string, data []byte, perm os.FileMode) error {
 }
 
 // ReadDir reads and returns sorted directory entries.
+//
+// The entries are sorted by name in ascending order as required by io/fs.
+// For large directories (10000+ entries), this may have performance implications.
 func (c *Chroot) ReadDir(name string) ([]fs.DirEntry, error) {
 	return c.readDir(name, "readdir", cleanRootName)
 }
@@ -116,6 +147,9 @@ func (c *Chroot) Stat(name string) (os.FileInfo, error) {
 }
 
 // Lstat returns a FileInfo describing the named file without following final symlink.
+//
+// Note: This method is not part of the standard io/fs interfaces, but is provided
+// for compatibility with os package conventions and the RootLike interface.
 func (c *Chroot) Lstat(name string) (os.FileInfo, error) {
 	return c.stat(name, "lstat", uint64(unix.O_PATH|unix.O_NOFOLLOW), cleanRootName)
 }
@@ -146,6 +180,11 @@ func (c *Chroot) Chmod(name string, mode os.FileMode) error {
 
 // Chown changes the uid and gid of the named file.
 func (c *Chroot) Chown(name string, uid, gid int) error {
+	if uid < -1 || gid < -1 {
+		return &fs.PathError{Op: "chown", Path: name,
+			Err: errors.New("invalid uid or gid")}
+	}
+
 	parentFD, baseName, err := c.openParent(name, "chown", cleanRootName)
 	if err != nil {
 		return err
@@ -160,6 +199,11 @@ func (c *Chroot) Chown(name string, uid, gid int) error {
 
 // Lchown changes the uid and gid of the named file without following final symlink.
 func (c *Chroot) Lchown(name string, uid, gid int) error {
+	if uid < -1 || gid < -1 {
+		return &fs.PathError{Op: "lchown", Path: name,
+			Err: errors.New("invalid uid or gid")}
+	}
+
 	parentFD, baseName, err := c.openParent(name, "lchown", cleanRootName)
 	if err != nil {
 		return err
@@ -209,6 +253,9 @@ func (c *Chroot) Mkdir(name string, perm os.FileMode) error {
 }
 
 // MkdirAll creates a directory and all necessary parents in the root.
+//
+// In concurrent environments, there is a small window where a directory
+// could be replaced with a file between existence checks.
 func (c *Chroot) MkdirAll(name string, perm os.FileMode) error {
 	if err := validatePermMode("mkdir", name, perm); err != nil {
 		return err
@@ -279,13 +326,20 @@ func (c *Chroot) RemoveAll(name string) error {
 		return &fs.PathError{Op: "removeall", Path: name, Err: unix.EINVAL}
 	}
 
-	if err := c.removeAll(cleaned); err != nil && !os.IsNotExist(err) {
+	if err := c.removeAllDepth(cleaned, 0); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
 }
 
-func (c *Chroot) removeAll(cleaned string) error {
+const maxRemoveDepth = 1000
+
+func (c *Chroot) removeAllDepth(cleaned string, depth int) error {
+	if depth > maxRemoveDepth {
+		return &fs.PathError{Op: "removeall", Path: cleaned,
+			Err: errors.New("directory tree too deep")}
+	}
+
 	st, err := c.Lstat(cleaned)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -307,7 +361,7 @@ func (c *Chroot) removeAll(cleaned string) error {
 		if cleaned != "." {
 			child = cleaned + "/" + child
 		}
-		if err := c.removeAll(child); err != nil {
+		if err := c.removeAllDepth(child, depth+1); err != nil {
 			return err
 		}
 	}
@@ -368,12 +422,79 @@ func (c *Chroot) Symlink(oldname, newname string) error {
 	return nil
 }
 
-// FS returns fs.FS view of this chroot.
+// FS returns an io/fs.FS view of this chroot.
+//
+// The returned filesystem follows io/fs conventions:
+//   - Absolute paths are rejected (use relative paths only)
+//   - Open() returns read-only files
+//   - Implements fs.ReadFileFS, fs.ReadDirFS, fs.StatFS, fs.GlobFS, fs.SubFS
+//
+// For write operations, use the Chroot methods directly (Create, WriteFile, etc).
 func (c *Chroot) FS() fs.FS {
 	return &chrootFS{root: c}
 }
 
-func (c *Chroot) open(name string, op string, flags uint64, cleaner pathCleaner) (*os.File, error) {
+// OpenRoot opens a subdirectory and returns it as a new RootLike.
+//
+// This method is similar to os.Root.OpenRoot, creating a new root filesystem
+// at the specified subdirectory within the current root.
+//
+// The returned RootLike is independent of the parent Chroot. Closing the parent
+// does not affect the child, and vice versa.
+//
+// Example:
+//
+//	root, _ := chrootfs.New("/data")
+//	defer root.Close()
+//
+//	subRoot, _ := root.OpenRoot("configs")
+//	defer subRoot.Close()
+//
+//	// subRoot operates within /data/configs
+//	data, _ := subRoot.ReadFile("app.json")
+func (c *Chroot) OpenRoot(name string) (RootLike, error) {
+	if !fs.ValidPath(name) && name != "" && name != "." {
+		// Try cleaning as root name (allows absolute paths)
+		cleaned, err := cleanRootName(name)
+		if err != nil {
+			return nil, &fs.PathError{Op: "openroot", Path: name, Err: err}
+		}
+		name = cleaned
+	}
+
+	if name == "" || name == "." {
+		// Return a new handle to the same root
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+
+		if c == nil || c.root == nil {
+			return nil, &fs.PathError{Op: "openroot", Path: name, Err: os.ErrClosed}
+		}
+
+		fd, err := unix.Dup(int(c.root.Fd()))
+		if err != nil {
+			return nil, &fs.PathError{Op: "openroot", Path: name, Err: err}
+		}
+
+		return &Chroot{
+			name: c.name,
+			root: os.NewFile(uintptr(fd), c.name),
+		}, nil
+	}
+
+	// Open subdirectory as new root
+	subRoot, err := c.open(name, "openroot", uint64(unix.O_PATH|unix.O_DIRECTORY), 0, cleanRootName)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Chroot{
+		name: path.Join(c.name, name),
+		root: subRoot,
+	}, nil
+}
+
+func (c *Chroot) open(name string, op string, flags uint64, mode uint64, cleaner pathCleaner) (*os.File, error) {
 	cleaned, err := cleaner(name)
 	if err != nil {
 		return nil, &fs.PathError{Op: op, Path: name, Err: err}
@@ -386,7 +507,7 @@ func (c *Chroot) open(name string, op string, flags uint64, cleaner pathCleaner)
 		return nil, &fs.PathError{Op: op, Path: name, Err: os.ErrClosed}
 	}
 
-	fd, err := openat2(int(c.root.Fd()), cleaned, flags)
+	fd, err := openat2(int(c.root.Fd()), cleaned, flags, mode)
 	if err != nil {
 		return nil, &fs.PathError{Op: op, Path: name, Err: err}
 	}
@@ -394,7 +515,7 @@ func (c *Chroot) open(name string, op string, flags uint64, cleaner pathCleaner)
 }
 
 func (c *Chroot) readFile(name string, op string, cleaner pathCleaner) ([]byte, error) {
-	f, err := c.open(name, op, uint64(unix.O_RDONLY), cleaner)
+	f, err := c.open(name, op, uint64(unix.O_RDONLY), 0, cleaner)
 	if err != nil {
 		return nil, err
 	}
@@ -408,7 +529,7 @@ func (c *Chroot) readFile(name string, op string, cleaner pathCleaner) ([]byte, 
 }
 
 func (c *Chroot) readDir(name string, op string, cleaner pathCleaner) ([]fs.DirEntry, error) {
-	f, err := c.open(name, op, uint64(unix.O_RDONLY|unix.O_DIRECTORY), cleaner)
+	f, err := c.open(name, op, uint64(unix.O_RDONLY|unix.O_DIRECTORY), 0, cleaner)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +546,7 @@ func (c *Chroot) readDir(name string, op string, cleaner pathCleaner) ([]fs.DirE
 }
 
 func (c *Chroot) stat(name string, op string, flags uint64, cleaner pathCleaner) (os.FileInfo, error) {
-	f, err := c.open(name, op, flags, cleaner)
+	f, err := c.open(name, op, flags, 0, cleaner)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +594,7 @@ func (c *Chroot) openParent(name string, op string, cleaner pathCleaner) (int, s
 		c.mu.RUnlock()
 		return 0, "", &fs.PathError{Op: op, Path: name, Err: os.ErrClosed}
 	}
-	parentFD, err := openat2(int(c.root.Fd()), dirName, uint64(unix.O_PATH|unix.O_DIRECTORY))
+	parentFD, err := openat2(int(c.root.Fd()), dirName, uint64(unix.O_PATH|unix.O_DIRECTORY), 0)
 	c.mu.RUnlock()
 	if err != nil {
 		return 0, "", &fs.PathError{Op: op, Path: name, Err: err}
@@ -481,9 +602,10 @@ func (c *Chroot) openParent(name string, op string, cleaner pathCleaner) (int, s
 	return parentFD, baseName, nil
 }
 
-func openat2(rootFD int, name string, flags uint64) (int, error) {
+func openat2(rootFD int, name string, flags uint64, mode uint64) (int, error) {
 	how := &unix.OpenHow{
 		Flags:   flags | uint64(unix.O_CLOEXEC),
+		Mode:    mode,
 		Resolve: uint64(unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS),
 	}
 	return unix.Openat2(rootFD, name, how)
@@ -509,7 +631,8 @@ func readlinkat(dirFD int, name string) (string, error) {
 
 func validatePermMode(op string, path string, perm os.FileMode) error {
 	if perm&0o777 != perm {
-		return &fs.PathError{Op: op, Path: path, Err: errors.New("unsupported file mode")}
+		return &fs.PathError{Op: op, Path: path,
+			Err: errors.New("permission mode must be 0-0777, special bits not allowed")}
 	}
 	return nil
 }
@@ -527,7 +650,7 @@ var _ fs.GlobFS = (*chrootFS)(nil)
 var _ fs.SubFS = (*chrootFS)(nil)
 
 func (f *chrootFS) Open(name string) (fs.File, error) {
-	return f.root.open(name, "open", uint64(unix.O_RDONLY), cleanOpenName)
+	return f.root.open(name, "open", uint64(unix.O_RDONLY), 0, cleanOpenName)
 }
 
 func (f *chrootFS) ReadFile(name string) ([]byte, error) {
@@ -562,7 +685,7 @@ func (f *chrootFS) Sub(dir string) (fs.FS, error) {
 		return f, nil
 	}
 
-	subRoot, err := f.root.open(dir, "sub", uint64(unix.O_PATH|unix.O_DIRECTORY), cleanOpenName)
+	subRoot, err := f.root.open(dir, "sub", uint64(unix.O_PATH|unix.O_DIRECTORY), 0, cleanOpenName)
 	if err != nil {
 		return nil, err
 	}
@@ -573,6 +696,10 @@ func (f *chrootFS) Sub(dir string) (fs.FS, error) {
 	return &chrootFS{root: sub}, nil
 }
 
+// openOnlyFS is a minimal fs.FS implementation for fs.Glob.
+//
+// The fs.Glob function requires an fs.FS with only an Open method,
+// so we wrap the Open function to satisfy the interface.
 type openOnlyFS struct {
 	open func(string) (fs.File, error)
 }
