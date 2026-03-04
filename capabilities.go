@@ -8,8 +8,8 @@ import (
 
 // IsSupported checks if the current OS and kernel support go-chrootfs functionality.
 //
-// This function tests whether openat2 with RESOLVE_IN_ROOT is available,
-// which requires Linux kernel 5.6 or later.
+// This function checks whether the Linux kernel version is 5.6 or later,
+// which is required for openat2 with RESOLVE_IN_ROOT support.
 //
 // Returns true if go-chrootfs can be used on the current system, false otherwise.
 //
@@ -24,22 +24,84 @@ import (
 //	    // ...
 //	}
 func IsSupported() bool {
-	// Try to perform a test openat2 call with RESOLVE_IN_ROOT
-	// Use current directory as a safe test target
+	var uname unix.Utsname
+	if err := unix.Uname(&uname); err != nil {
+		return false
+	}
+
+	// Parse kernel version from uname
+	// Release format is typically "5.15.0-91-generic" or similar
+	release := string(uname.Release[:])
+	// Find the null terminator
+	for i, c := range uname.Release {
+		if c == 0 {
+			release = string(uname.Release[:i])
+			break
+		}
+	}
+
+	major, minor, err := parseKernelVersion(release)
+	if err != nil {
+		// If parsing fails, fall back to actual syscall test
+		return isSupportedBySyscall()
+	}
+
+	// Check if kernel is >= 5.6
+	// openat2 was introduced in Linux 5.6
+	if major > 5 || (major == 5 && minor >= 6) {
+		return true
+	}
+
+	return false
+}
+
+// parseKernelVersion parses a kernel version string like "5.15.0-91-generic"
+// and returns the major and minor version numbers.
+func parseKernelVersion(version string) (major, minor int, err error) {
+	// Find the first two numbers separated by dots
+	var n int
+	for i := 0; i < len(version); i++ {
+		if version[i] >= '0' && version[i] <= '9' {
+			n = n*10 + int(version[i]-'0')
+		} else if version[i] == '.' {
+			if major == 0 {
+				major = n
+				n = 0
+			} else {
+				minor = n
+				return major, minor, nil
+			}
+		} else {
+			// Stop at first non-digit, non-dot character
+			if major > 0 {
+				minor = n
+				return major, minor, nil
+			}
+		}
+	}
+	// Handle case where we reached end of string
+	if major > 0 {
+		minor = n
+		return major, minor, nil
+	}
+	return 0, 0, &os.PathError{Op: "parse_version", Path: version, Err: os.ErrInvalid}
+}
+
+// isSupportedBySyscall performs an actual syscall to test support.
+// This is used as a fallback when kernel version parsing fails.
+func isSupportedBySyscall() bool {
 	fd, err := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return false
 	}
 	defer unix.Close(fd)
 
-	// Try openat2 with RESOLVE_IN_ROOT
 	var how unix.OpenHow
 	how.Flags = unix.O_RDONLY | unix.O_PATH
 	how.Resolve = unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS
 
 	testFd, err := unix.Openat2(fd, ".", &how)
 	if err != nil {
-		// openat2 or RESOLVE_IN_ROOT not supported
 		return false
 	}
 	unix.Close(testFd)
