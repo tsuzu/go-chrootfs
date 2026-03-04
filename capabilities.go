@@ -1,68 +1,105 @@
 package chrootfs
 
-import "os"
+import (
+	"os"
 
-// Capabilities describes the features supported by a RootLike implementation.
-type Capabilities struct {
-	// SupportsOpenRoot indicates whether the implementation supports creating sub-roots.
-	// This is true for Chroot and os.Root (Go 1.24+).
-	SupportsOpenRoot bool
+	"golang.org/x/sys/unix"
+)
 
-	// IsOSRoot indicates whether the implementation is os.Root from the standard library.
-	IsOSRoot bool
-
-	// IsChrootFS indicates whether the implementation is from this package.
-	IsChrootFS bool
-}
-
-// GetCapabilities returns the capabilities of the given RootLike implementation.
+// IsSupported checks if the current OS and kernel support go-chrootfs functionality.
 //
-// This function uses type assertions to determine which features are supported
-// by the implementation, without requiring direct dependencies on concrete types.
+// This function tests whether openat2 with RESOLVE_IN_ROOT is available,
+// which requires Linux kernel 5.6 or later.
+//
+// Returns true if go-chrootfs can be used on the current system, false otherwise.
 //
 // Example:
 //
-//	caps := chrootfs.GetCapabilities(root)
-//	if caps.SupportsOpenRoot {
-//	    subRoot, err := chrootfs.OpenRoot(root, "subdir")
+//	if chrootfs.IsSupported() {
+//	    root, err := chrootfs.New("/sandbox")
+//	    // ...
+//	} else {
+//	    // Fallback to os.Root or other mechanism
+//	    root, err := os.OpenRoot("/sandbox")
 //	    // ...
 //	}
-func GetCapabilities(root RootLike) Capabilities {
-	caps := Capabilities{}
-
-	// Check if it supports OpenRoot
-	if _, ok := root.(RootLikeWithOpenRoot); ok {
-		caps.SupportsOpenRoot = true
-		caps.IsChrootFS = true
-		return caps
+func IsSupported() bool {
+	// Try to perform a test openat2 call with RESOLVE_IN_ROOT
+	// Use current directory as a safe test target
+	fd, err := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return false
 	}
+	defer unix.Close(fd)
 
-	// Check if it's os.Root (has OpenRoot method that returns *os.Root)
-	type osRootLike interface {
-		RootLike
-		OpenRoot(string) (*os.Root, error)
+	// Try openat2 with RESOLVE_IN_ROOT
+	var how unix.OpenHow
+	how.Flags = unix.O_RDONLY | unix.O_PATH
+	how.Resolve = unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS
+
+	testFd, err := unix.Openat2(fd, ".", &how)
+	if err != nil {
+		// openat2 or RESOLVE_IN_ROOT not supported
+		return false
 	}
+	unix.Close(testFd)
 
-	if _, ok := root.(osRootLike); ok {
-		caps.SupportsOpenRoot = true
-		caps.IsOSRoot = true
-		return caps
-	}
-
-	return caps
+	return true
 }
 
-// SupportsOpenRoot checks if the given RootLike implementation supports creating sub-roots.
+// MustBeSupported panics if go-chrootfs is not supported on the current system.
 //
-// This is a convenience function that returns true if the implementation has an OpenRoot method,
-// which is present in both Chroot and os.Root (Go 1.24+).
+// This is useful for applications that absolutely require RESOLVE_IN_ROOT semantics
+// and cannot fall back to alternative implementations.
 //
 // Example:
 //
-//	if chrootfs.SupportsOpenRoot(root) {
-//	    subRoot, err := chrootfs.OpenRoot(root, "configs")
-//	    // ...
+//	func init() {
+//	    chrootfs.MustBeSupported()
 //	}
-func SupportsOpenRoot(root RootLike) bool {
-	return GetCapabilities(root).SupportsOpenRoot
+func MustBeSupported() {
+	if !IsSupported() {
+		panic("go-chrootfs requires Linux kernel 5.6+ with openat2 and RESOLVE_IN_ROOT support")
+	}
+}
+
+// CheckSupport returns a detailed error if go-chrootfs is not supported.
+//
+// This function is similar to IsSupported() but provides more context about
+// why the feature is not available.
+//
+// Returns nil if supported, otherwise returns an error describing the issue.
+//
+// Example:
+//
+//	if err := chrootfs.CheckSupport(); err != nil {
+//	    log.Printf("go-chrootfs not available: %v", err)
+//	    // Use fallback
+//	}
+func CheckSupport() error {
+	fd, err := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return &os.PathError{
+			Op:   "check_support",
+			Path: ".",
+			Err:  err,
+		}
+	}
+	defer unix.Close(fd)
+
+	var how unix.OpenHow
+	how.Flags = unix.O_RDONLY | unix.O_PATH
+	how.Resolve = unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS
+
+	testFd, err := unix.Openat2(fd, ".", &how)
+	if err != nil {
+		return &os.PathError{
+			Op:   "openat2",
+			Path: ".",
+			Err:  err,
+		}
+	}
+	unix.Close(testFd)
+
+	return nil
 }
