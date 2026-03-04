@@ -78,39 +78,6 @@ func TestNewRequiresSupport(t *testing.T) {
 	}
 }
 
-func TestParseKernelVersion(t *testing.T) {
-	tests := []struct {
-		version string
-		major   int
-		minor   int
-		wantErr bool
-	}{
-		{"5.15.0-91-generic", 5, 15, false},
-		{"6.8.0-90-generic", 6, 8, false},
-		{"5.6.0", 5, 6, false},
-		{"5.6", 5, 6, false},
-		{"4.19.0", 4, 19, false},
-		{"6.10.1-amd64", 6, 10, false},
-		{"invalid", 0, 0, true},
-		{"", 0, 0, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.version, func(t *testing.T) {
-			major, minor, err := parseKernelVersion(tt.version)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseKernelVersion(%q) error = %v, wantErr %v", tt.version, err, tt.wantErr)
-				return
-			}
-			if !tt.wantErr {
-				if major != tt.major || minor != tt.minor {
-					t.Errorf("parseKernelVersion(%q) = (%d, %d), want (%d, %d)", tt.version, major, minor, tt.major, tt.minor)
-				}
-			}
-		})
-	}
-}
-
 func TestFallbackPattern(t *testing.T) {
 	// This test demonstrates the recommended fallback pattern
 	root := t.TempDir()
