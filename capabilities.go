@@ -25,23 +25,7 @@ import (
 //	    // ...
 //	}
 func IsSupported() bool {
-	fd, err := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
-	if err != nil {
-		return false
-	}
-	defer unix.Close(fd)
-
-	var how unix.OpenHow
-	how.Flags = unix.O_RDONLY | unix.O_PATH
-	how.Resolve = unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS
-
-	testFd, err := unix.Openat2(fd, ".", &how)
-	if err != nil {
-		return false
-	}
-	unix.Close(testFd)
-
-	return true
+	return CheckSupport() == nil
 }
 
 // MustBeSupported panics if go-chrootfs is not supported on the current system.
