@@ -1,0 +1,86 @@
+package chrootfs
+
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+// IsSupported checks if the current OS and kernel support go-chrootfs functionality.
+//
+// This function tests whether openat2 with RESOLVE_IN_ROOT is available by
+// performing an actual syscall. This is necessary because some distributions
+// (e.g., RHEL) may backport features to older kernel version numbers.
+//
+// Returns true if go-chrootfs can be used on the current system, false otherwise.
+//
+// Example:
+//
+//	if chrootfs.IsSupported() {
+//	    root, err := chrootfs.New("/sandbox")
+//	    // ...
+//	} else {
+//	    // Fallback to os.Root or other mechanism
+//	    root, err := os.OpenRoot("/sandbox")
+//	    // ...
+//	}
+func IsSupported() bool {
+	return CheckSupport() == nil
+}
+
+// MustBeSupported panics if go-chrootfs is not supported on the current system.
+//
+// This is useful for applications that absolutely require RESOLVE_IN_ROOT semantics
+// and cannot fall back to alternative implementations.
+//
+// Example:
+//
+//	func init() {
+//	    chrootfs.MustBeSupported()
+//	}
+func MustBeSupported() {
+	if !IsSupported() {
+		panic("go-chrootfs requires Linux kernel 5.6+ with openat2 and RESOLVE_IN_ROOT support")
+	}
+}
+
+// CheckSupport returns a detailed error if go-chrootfs is not supported.
+//
+// This function is similar to IsSupported() but provides more context about
+// why the feature is not available.
+//
+// Returns nil if supported, otherwise returns an error describing the issue.
+//
+// Example:
+//
+//	if err := chrootfs.CheckSupport(); err != nil {
+//	    log.Printf("go-chrootfs not available: %v", err)
+//	    // Use fallback
+//	}
+func CheckSupport() error {
+	fd, err := unix.Open(".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return &os.PathError{
+			Op:   "check_support",
+			Path: ".",
+			Err:  err,
+		}
+	}
+	defer unix.Close(fd)
+
+	var how unix.OpenHow
+	how.Flags = unix.O_RDONLY | unix.O_PATH
+	how.Resolve = unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS
+
+	testFd, err := unix.Openat2(fd, ".", &how)
+	if err != nil {
+		return &os.PathError{
+			Op:   "openat2",
+			Path: ".",
+			Err:  err,
+		}
+	}
+	unix.Close(testFd)
+
+	return nil
+}
